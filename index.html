@@ -78,16 +78,19 @@
         submissions: submissionsResult.data || [],
         audit_logs: auditLogsResult.data || []
       };
+      supabaseStatus = { state: 'connected', message: 'Authenticated and connected to Supabase.' };
     }
 
-    async function saveStoredData(data, submissionId) {
+    async function saveStoredData(data, submissionId, isNewSubmission) {
       if (!supabaseClient || !currentUser) throw new Error('Sign in before saving data.');
       const submission = data.submissions.find(item => item.id === submissionId);
       if (!submission) throw new Error('The submission to save could not be found.');
-      const { error: submissionError } = await supabaseClient
-        .from('scholarship_submissions')
-        .upsert([submission], { onConflict: 'id' });
+      const submissionRequest = isNewSubmission
+        ? supabaseClient.from('scholarship_submissions').insert(submission)
+        : supabaseClient.from('scholarship_submissions').update(submission).eq('id', submissionId);
+      const { data: savedSubmission, error: submissionError } = await submissionRequest.select('id').single();
       if (submissionError) throw submissionError;
+      if (!savedSubmission) throw new Error('Supabase did not confirm the submission save.');
       const lastLog = data.audit_logs[data.audit_logs.length - 1];
       if (lastLog) {
         const { error } = await supabaseClient.from('scholarship_audit_logs').insert(lastLog);
@@ -348,9 +351,9 @@
     // ==========================================
     // 6. ACTION HANDLERS
     // ==========================================
-    async function persistChanges(db, submissionId) {
+    async function persistChanges(db, submissionId, isNewSubmission = false) {
       try {
-        await saveStoredData(db, submissionId);
+        await saveStoredData(db, submissionId, isNewSubmission);
         authMessage = '';
         render();
         return true;
@@ -441,6 +444,7 @@
       const inc = parseInt(form.inc_count.value, 10);
       const drop = parseInt(form.drop_count.value, 10);
       let changedSubmissionId;
+      let isNewSubmission = false;
 
       if (gwa < 1.00 || gwa > 5.00) return alert('GWA must be between 1.00 and 5.00');
       if (units < 0 || failed < 0 || inc < 0 || drop < 0) return alert('Counts and units must be non-negative');
@@ -479,10 +483,11 @@
         };
         db.submissions.push(newSub);
         changedSubmissionId = newSub.id;
+        isNewSubmission = true;
         logAction(db, newSub.id, 'CREATE_SUBMISSION', 'New grade summary submitted');
       }
 
-      if (await persistChanges(db, changedSubmissionId)) alert('Submission successfully recorded!');
+      if (await persistChanges(db, changedSubmissionId, isNewSubmission)) alert('Submission successfully recorded!');
     }
 
     async function resetDatabase() {
@@ -525,7 +530,7 @@
           <div class="flex flex-wrap items-center gap-2">
             ${currentUser ? `
               <span class="text-xs text-slate-600">${escapeHtml(currentUser.email || '')} · ${currentRole === 'Staff' ? 'Staff' : 'Scholar'}</span>
-              <button onclick="runAutomatedTests()" class="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg transition">Run Tests (TC01-TC10)</button>
+              ${currentRole === 'Staff' ? '<button onclick="runAutomatedTests()" class="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg transition">Run Tests (TC01-TC10)</button>' : ''}
               <button onclick="resetDatabase()" class="text-xs font-semibold bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg transition">Reload Data</button>
               <button onclick="handleSignOut()" class="text-xs font-semibold bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg transition">Sign out</button>
             ` : ''}
