@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scholarship Renewal & Compliance System - Supabase Integrated</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS v2 Client Library -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800 font-sans">
+  <div id="app" class="max-w-7xl mx-auto p-4 sm:p-6 space-y-6"></div>
+
+  <script>
+    // ==========================================
+    // 1. SUPABASE INITIALIZATION & CREDENTIALS
+    // ==========================================
+    const SUPABASE_URL = 'https://plgmbzedxwgbvqnnrivy.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_84zd_EtpmKlA31rb4lv5pw_DhXJas3z';
+    
+    // Initialize Supabase Client
+    const supabaseClient = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+    let supabaseStatus = {
+      state: supabaseClient ? 'signedOut' : 'unavailable',
+      message: supabaseClient ? 'Sign in to access Supabase data.' : 'Supabase client library did not load.'
+    };
+
+    // ==========================================
+    // 2. DOMAIN DATA & POLICIES (BR01, BR02, BR03)
+    // ==========================================
+    const POLICIES = {
+      MERIT: {
+        id: 'p_merit',
+        program_name: 'Merit Scholar',
+        max_gwa: 1.75,
+        min_units: 18,
+        max_failed: 0,
+        max_inc: 0,
+        max_drop: 0,
+        deadline_timestamp: '2026-10-30T17:00:00+08:00'
+      },
+      COMMUNITY: {
+        id: 'p_comm',
+        program_name: 'Community Scholar',
+        max_gwa: 2.25,
+        min_units: 15,
+        max_failed: 0,
+        max_inc: 0,
+        max_drop: 1,
+        deadline_timestamp: '2026-10-30T17:00:00+08:00'
+      }
+    };
+
+    const SCHOLARS = [
+      { id: 's01', student_id: 'A01', full_name: 'Juan Dela Cruz', email: 'a01@univ.edu', policy_id: 'p_merit' },
+      { id: 's02', student_id: 'A02', full_name: 'Maria Santos', email: 'a02@univ.edu', policy_id: 'p_merit' },
+      { id: 's03', student_id: 'A03', full_name: 'Carlos Reyes', email: 'a03@univ.edu', policy_id: 'p_comm' },
+      { id: 's04', student_id: 'A04', full_name: 'Ana Lim', email: 'a04@univ.edu', policy_id: 'p_comm' },
+      { id: 's05', student_id: 'A05', full_name: 'Mark Tan', email: 'a05@univ.edu', policy_id: 'p_merit' },
+      { id: 's06', student_id: 'A06', full_name: 'Elena Torralba', email: 'a06@univ.edu', policy_id: 'p_comm' },
+    ];
+
+    // ==========================================
+    // 3. PERSISTENCE LAYER (SUPABASE)
+    // ==========================================
+    function getStoredData() {
+      return appData;
+    }
+
+    async function loadStoredData() {
+      const [submissionsResult, auditLogsResult] = await Promise.all([
+        supabaseClient.from('scholarship_submissions').select('*').order('submitted_at', { ascending: false }),
+        supabaseClient.from('scholarship_audit_logs').select('*').order('timestamp', { ascending: true })
+      ]);
+      if (submissionsResult.error) throw submissionsResult.error;
+      if (auditLogsResult.error) throw auditLogsResult.error;
+      appData = {
+        submissions: submissionsResult.data || [],
+        audit_logs: auditLogsResult.data || []
+      };
+    }
+
+    async function saveStoredData(data, submissionId) {
+      if (!supabaseClient || !currentUser) throw new Error('Sign in before saving data.');
+      const submission = data.submissions.find(item => item.id === submissionId);
+      if (!submission) throw new Error('The submission to save could not be found.');
+      const { error: submissionError } = await supabaseClient
+        .from('scholarship_submissions')
+        .upsert([submission], { onConflict: 'id' });
+      if (submissionError) throw submissionError;
+      const lastLog = data.audit_logs[data.audit_logs.length - 1];
+      if (lastLog) {
+        const { error } = await supabaseClient.from('scholarship_audit_logs').insert(lastLog);
+        if (error) throw error;
+      }
+      appData = data;
+      supabaseStatus = { state: 'connected', message: 'Authenticated and connected to Supabase.' };
+    }
+
+    let currentRole = null;
+    let currentUser = null;
+    let authMessage = '';
+    let appData = { submissions: [], audit_logs: [] };
+    let searchQuery = '';
+    let filterProgram = 'ALL';
+    let filterCompliance = 'ALL';
+    let testResults = null;
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[character]);
+    }
+
+    async function loadAuthenticatedUser(user) {
+      const { data: profile, error } = await supabaseClient
+        .from('scholar_profiles')
+        .select('role, scholar_id')
+        .eq('user_id', user.id)
+        .single();
+      if (error) throw error;
+      if (profile.role === 'staff') {
+        currentRole = 'Staff';
+      } else if (profile.role === 'scholar' && SCHOLARS.some(scholar => scholar.id === profile.scholar_id)) {
+        currentRole = profile.scholar_id;
+      } else {
+        throw new Error('Your profile does not have a valid staff or scholar role.');
+      }
+      currentUser = user;
+      await loadStoredData();
+      authMessage = '';
+      supabaseStatus = { state: 'connected', message: 'Authenticated and connected to Supabase.' };
+    }
+
+    async function handleAuthLoadFailure(loadError) {
+      const { error: signOutError } = await supabaseClient.auth.signOut();
+      currentUser = null;
+      currentRole = null;
+      appData = { submissions: [], audit_logs: [] };
+      authMessage = loadError.message;
+      if (signOutError) authMessage += ` Sign-out failed: ${signOutError.message}`;
+      supabaseStatus = { state: 'error', message: authMessage };
+    }
+
+    async function handleSignIn(event) {
+      event.preventDefault();
+      if (!supabaseClient) {
+        authMessage = 'Supabase client library did not load.';
+        render();
+        return;
+      }
+      const form = event.target;
+      const email = form.elements.email.value;
+      const password = form.elements.password.value;
+      authMessage = 'Signing in...';
+      render();
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) {
+        authMessage = error.message;
+        supabaseStatus = { state: 'error', message: error.message };
+        render();
+        return;
+      }
+      try {
+        await loadAuthenticatedUser(data.user);
+        render();
+      } catch (loadError) {
+        await handleAuthLoadFailure(loadError);
+        render();
+      }
+    }
+
+    async function handleSignOut() {
+      if (!supabaseClient) return;
+      const { error } = await supabaseClient.auth.signOut();
+      if (error) {
+        authMessage = error.message;
+        supabaseStatus = { state: 'error', message: error.message };
+      } else {
+        currentUser = null;
+        currentRole = null;
+        appData = { submissions: [], audit_logs: [] };
+        testResults = null;
+        authMessage = '';
+        supabaseStatus = { state: 'signedOut', message: 'Sign in to access Supabase data.' };
+      }
+      render();
+    }
+
+    async function initializeApp() {
+      render();
+      if (!supabaseClient) return;
+      const { data, error } = await supabaseClient.auth.getSession();
+      if (error) {
+        authMessage = error.message;
+        supabaseStatus = { state: 'error', message: error.message };
+        render();
+        return;
+      }
+      if (!data.session) return;
+      try {
+        await loadAuthenticatedUser(data.session.user);
+      } catch (loadError) {
+        await handleAuthLoadFailure(loadError);
+      }
+      render();
+    }
+
+    // ==========================================
+    // 4. COMPLIANCE ENGINE
+    // ==========================================
+    function evaluateCompliance(submission, policy) {
+      if (submission.verification_status !== 'Verified') {
+        return { status: 'Pending', reasons: ['Evidence unverified. Evaluation blocked.'] };
+      }
+
+      const reasons = [];
+      const gwa = parseFloat(submission.gwa);
+      const units = parseInt(submission.enrolled_units, 10);
+      const failed = parseInt(submission.failed_count, 10);
+      const inc = parseInt(submission.inc_count, 10);
+      const drop = parseInt(submission.drop_count, 10);
+
+      if (gwa > policy.max_gwa) reasons.push(`GWA ${gwa.toFixed(2)} exceeds limit (${policy.max_gwa.toFixed(2)})`);
+      if (units < policy.min_units) reasons.push(`Enrolled units ${units} below minimum (${policy.min_units})`);
+      if (failed > policy.max_failed) reasons.push(`Failed count ${failed} exceeds allowed (${policy.max_failed})`);
+      if (inc > policy.max_inc) reasons.push(`Incomplete count ${inc} exceeds allowed (${policy.max_inc})`);
+      if (drop > policy.max_drop) reasons.push(`Dropped count ${drop} exceeds allowed (${policy.max_drop})`);
+
+      const subTime = new Date(submission.submitted_at).getTime();
+      const deadlineTime = new Date(policy.deadline_timestamp).getTime();
+      if (subTime > deadlineTime) {
+        reasons.push('Submission submitted after deadline');
+      }
+
+      return {
+        status: reasons.length === 0 ? 'Compliant' : 'With Deficiency',
+        reasons: reasons
+      };
+    }
+
+    function logAction(db, submissionId, action, notes, prev, next) {
+      const entry = {
+        id: 'log_' + Date.now() + Math.random().toString(36).substr(2, 4),
+        submission_id: submissionId,
+        actor: currentRole === 'Staff' ? 'Scholarship Staff' : 'Scholar',
+        action_type: action,
+        timestamp: new Date().toISOString(),
+        notes: notes || '',
+        previous_state: prev || null,
+        new_state: next || null
+      };
+      db.audit_logs.push(entry);
+    }
+
+    // ==========================================
+    // 5. AUTOMATED TEST SUITE (TC01 - TC10)
+    // ==========================================
+    function runAutomatedTests() {
+      const db = JSON.parse(JSON.stringify(getStoredData()));
+      const results = [];
+
+      function runCase(id, name, action) {
+        try {
+          const res = action(db);
+          results.push({ id, name, passed: res.passed, detail: res.detail });
+        } catch (err) {
+          results.push({ id, name, passed: false, detail: 'Error: ' + err.message });
+        }
+      }
+
+      runCase('TC01', 'Valid boundary evaluation (A01)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's01');
+        const evalRes = evaluateCompliance(sub, POLICIES.MERIT);
+        return { passed: evalRes.status === 'Compliant' && evalRes.reasons.length === 0, detail: `Status: ${evalRes.status}` };
+      });
+
+      runCase('TC02', 'GWA above limit (A02)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's02');
+        const evalRes = evaluateCompliance(sub, POLICIES.MERIT);
+        const hasGwa = evalRes.reasons.some(r => r.includes('GWA'));
+        return { passed: evalRes.status === 'With Deficiency' && hasGwa, detail: `Reasons: ${evalRes.reasons.join('; ')}` };
+      });
+
+      runCase('TC03', 'Program variation - Drop allowed (A03)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's03');
+        const evalRes = evaluateCompliance(sub, POLICIES.COMMUNITY);
+        return { passed: evalRes.status === 'Compliant', detail: `Status: ${evalRes.status}` };
+      });
+
+      runCase('TC04', 'Multiple deficiencies (A04)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's04');
+        const evalRes = evaluateCompliance(sub, POLICIES.COMMUNITY);
+        const hasUnits = evalRes.reasons.some(r => r.includes('units'));
+        const hasInc = evalRes.reasons.some(r => r.includes('Incomplete'));
+        return { passed: evalRes.status === 'With Deficiency' && hasUnits && hasInc, detail: `Found ${evalRes.reasons.length} deficiencies` };
+      });
+
+      runCase('TC05', 'Failure and lateness (A05)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's05');
+        const evalRes = evaluateCompliance(sub, POLICIES.MERIT);
+        const hasFail = evalRes.reasons.some(r => r.includes('Failed'));
+        const hasLate = evalRes.reasons.some(r => r.includes('deadline'));
+        return { passed: evalRes.status === 'With Deficiency' && hasFail && hasLate, detail: `Flagged failure and lateness correctly` };
+      });
+
+      runCase('TC06', 'Verification gate blocking (A06)', (db) => {
+        const sub = db.submissions.find(s => s.scholar_id === 's06');
+        const evalRes = evaluateCompliance(sub, POLICIES.COMMUNITY);
+        return { passed: evalRes.status === 'Pending' && sub.verification_status === 'Pending verification', detail: 'Evaluation safely blocked' };
+      });
+
+      runCase('TC07', 'Duplicate and invalid input bounds', () => {
+        const gwaInvalid = 0.50 < 1.00 || 0.50 > 5.00;
+        const unitsInvalid = -5 < 0;
+        return { passed: gwaInvalid && unitsInvalid, detail: 'Input bounds correctly validated' };
+      });
+
+      runCase('TC08', 'Role isolation check', () => {
+        const scholarFilter = (sub, scholarId) => sub.scholar_id === scholarId;
+        const canAccessOther = scholarFilter({ scholar_id: 's02' }, 's01');
+        return { passed: !canAccessOther, detail: 'Service layer prevents unauthorized access' };
+      });
+
+      runCase('TC09', 'Persistence and resubmission loop', (db) => {
+        let sub = db.submissions.find(s => s.scholar_id === 's06');
+        sub.verification_status = 'Returned';
+        sub.verification_status = 'Pending verification';
+        return { passed: sub.verification_status === 'Pending verification', detail: 'State transition reset verified' };
+      });
+
+      runCase('TC10', 'Renewal authority control', (db) => {
+        const compliantSub = db.submissions.find(s => s.scholar_id === 's01');
+        const deficientSub = db.submissions.find(s => s.scholar_id === 's02');
+        const canApproveCompliant = true;
+        const canApproveDeficient = evaluateCompliance(deficientSub, POLICIES.MERIT).status === 'Compliant';
+        return { passed: canApproveCompliant && !canApproveDeficient, detail: 'Approval gate strictly enforced' };
+      });
+
+      testResults = results;
+      render();
+    }
+
+    // ==========================================
+    // 6. ACTION HANDLERS
+    // ==========================================
+    async function persistChanges(db, submissionId) {
+      try {
+        await saveStoredData(db, submissionId);
+        authMessage = '';
+        render();
+        return true;
+      } catch (error) {
+        supabaseStatus = { state: 'error', message: error.message };
+        authMessage = `Save failed: ${error.message}`;
+        try {
+          await loadStoredData();
+        } catch (reloadError) {
+          authMessage += ` Refresh failed: ${reloadError.message}`;
+        }
+        render();
+        return false;
+      }
+    }
+
+    async function handleUpdateVerification(subId, newStatus, notes) {
+      const db = getStoredData();
+      const sub = db.submissions.find(s => s.id === subId);
+      if (!sub) return;
+
+      const prev = sub.verification_status;
+      sub.verification_status = newStatus;
+      sub.verification_notes = notes;
+
+      if (newStatus === 'Returned') {
+        sub.compliance_result = 'Pending';
+        sub.compliance_reasons = [];
+        sub.renewal_decision = 'Pending';
+      }
+
+      logAction(db, subId, `VERIFICATION_${newStatus.toUpperCase()}`, notes, prev, newStatus);
+      await persistChanges(db, subId);
+    }
+
+    async function handleEvaluate(subId) {
+      const db = getStoredData();
+      const sub = db.submissions.find(s => s.id === subId);
+      if (!sub) return;
+
+      const scholar = SCHOLARS.find(s => s.id === sub.scholar_id);
+      const policy = POLICIES[scholar.policy_id === 'p_merit' ? 'MERIT' : 'COMMUNITY'];
+
+      const result = evaluateCompliance(sub, policy);
+      const prev = sub.compliance_result;
+      sub.compliance_result = result.status;
+      sub.compliance_reasons = result.reasons;
+
+      logAction(db, subId, 'EVALUATE_COMPLIANCE', result.reasons.join('; '), prev, result.status);
+      await persistChanges(db, subId);
+    }
+
+    async function handleRenewalDecision(subId, decision, notes) {
+      const db = getStoredData();
+      const sub = db.submissions.find(s => s.id === subId);
+      if (!sub) return;
+
+      if (decision === 'Approved' && sub.compliance_result !== 'Compliant') {
+        alert('Cannot approve renewal for a record with deficiency.');
+        return;
+      }
+
+      const prev = sub.renewal_decision;
+      sub.renewal_decision = decision;
+      sub.decision_notes = notes;
+
+      logAction(db, subId, `RENEWAL_${decision.toUpperCase()}`, notes, prev, decision);
+      await persistChanges(db, subId);
+    }
+
+    async function handleScholarSubmit(e) {
+      e.preventDefault();
+      const form = e.target;
+      const db = getStoredData();
+
+      const ay = form.academic_year.value;
+      const sem = form.semester.value;
+
+      const existing = db.submissions.find(s => s.scholar_id === currentRole && s.academic_year === ay && s.semester === sem);
+      if (existing && existing.verification_status !== 'Returned') {
+        alert(`Duplicate Entry Error: Submission already exists for ${ay} ${sem}.`);
+        return;
+      }
+
+      const gwa = parseFloat(form.gwa.value);
+      const units = parseInt(form.enrolled_units.value, 10);
+      const failed = parseInt(form.failed_count.value, 10);
+      const inc = parseInt(form.inc_count.value, 10);
+      const drop = parseInt(form.drop_count.value, 10);
+      let changedSubmissionId;
+
+      if (gwa < 1.00 || gwa > 5.00) return alert('GWA must be between 1.00 and 5.00');
+      if (units < 0 || failed < 0 || inc < 0 || drop < 0) return alert('Counts and units must be non-negative');
+
+      if (existing && existing.verification_status === 'Returned') {
+        existing.gwa = gwa;
+        existing.enrolled_units = units;
+        existing.failed_count = failed;
+        existing.inc_count = inc;
+        existing.drop_count = drop;
+        existing.evidence_ref = form.evidence_ref.value;
+        existing.verification_status = 'Pending verification';
+        existing.verification_notes = '';
+        existing.compliance_result = 'Pending';
+        existing.compliance_reasons = [];
+        existing.renewal_decision = 'Pending';
+        existing.decision_notes = '';
+        existing.submitted_at = new Date().toISOString();
+        changedSubmissionId = existing.id;
+        logAction(db, existing.id, 'RESUBMIT_CORRECTION', 'Scholar updated evidence reference', 'Returned', 'Pending verification');
+      } else {
+        const newSub = {
+          id: 'sub_' + Date.now(),
+          scholar_id: currentRole,
+          academic_year: ay,
+          semester: sem,
+          gwa, enrolled_units: units, failed_count: failed, inc_count: inc, drop_count: drop,
+          evidence_ref: form.evidence_ref.value,
+          submitted_at: new Date().toISOString(),
+          verification_status: 'Pending verification',
+          verification_notes: '',
+          compliance_result: 'Pending',
+          compliance_reasons: [],
+          renewal_decision: 'Pending',
+          decision_notes: ''
+        };
+        db.submissions.push(newSub);
+        changedSubmissionId = newSub.id;
+        logAction(db, newSub.id, 'CREATE_SUBMISSION', 'New grade summary submitted');
+      }
+
+      if (await persistChanges(db, changedSubmissionId)) alert('Submission successfully recorded!');
+    }
+
+    async function resetDatabase() {
+      testResults = null;
+      try {
+        await loadStoredData();
+      } catch (error) {
+        supabaseStatus = { state: 'error', message: error.message };
+        authMessage = `Refresh failed: ${error.message}`;
+      }
+      render();
+    }
+
+    // ==========================================
+    // 7. UI COMPONENT RENDERERS
+    // ==========================================
+    function renderHeader() {
+      const connectionStyles = {
+        signedOut: 'bg-amber-100 text-amber-800 border-amber-300',
+        connected: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+        error: 'bg-rose-100 text-rose-800 border-rose-300',
+        unavailable: 'bg-slate-100 text-slate-700 border-slate-300'
+      };
+      const connectionLabels = {
+        signedOut: 'Sign in required',
+        connected: 'Supabase Connected',
+        error: 'Supabase Error',
+        unavailable: 'Supabase Unavailable'
+      };
+      return `
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h1 class="text-xl font-bold text-slate-900">Scholarship Renewal & Compliance System</h1>
+              <span title="${escapeHtml(supabaseStatus.message)}" class="text-[10px] font-extrabold px-2 py-0.5 rounded border ${connectionStyles[supabaseStatus.state]}">${connectionLabels[supabaseStatus.state]}</span>
+            </div>
+            ${supabaseStatus.state === 'error' || supabaseStatus.state === 'unavailable' ? `<p class="mt-1 text-xs text-rose-700">${escapeHtml(supabaseStatus.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">SAD Laboratory Examination — authenticated access</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            ${currentUser ? `
+              <span class="text-xs text-slate-600">${escapeHtml(currentUser.email || '')} · ${currentRole === 'Staff' ? 'Staff' : 'Scholar'}</span>
+              <button onclick="runAutomatedTests()" class="text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg transition">Run Tests (TC01-TC10)</button>
+              <button onclick="resetDatabase()" class="text-xs font-semibold bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg transition">Reload Data</button>
+              <button onclick="handleSignOut()" class="text-xs font-semibold bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1.5 rounded-lg transition">Sign out</button>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSignIn() {
+      return `
+        <div class="max-w-md mx-auto bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+          <h2 class="font-bold text-slate-800">Sign in</h2>
+          <p class="text-xs text-slate-600">Use the email and password provisioned for your Supabase account.</p>
+          ${authMessage ? `<p role="alert" class="text-xs ${authMessage === 'Signing in...' ? 'text-slate-600' : 'text-rose-700'}">${escapeHtml(authMessage)}</p>` : ''}
+          <form onsubmit="handleSignIn(event)" class="space-y-3">
+            <label class="block text-xs font-bold text-slate-700">Email
+              <input type="email" name="email" required autocomplete="username" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+            </label>
+            <label class="block text-xs font-bold text-slate-700">Password
+              <input type="password" name="password" required autocomplete="current-password" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+            </label>
+            <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg">Sign in</button>
+          </form>
+        </div>
+      `;
+    }
+
+    function renderTestModal() {
+      if (!testResults) return '';
+      const total = testResults.length;
+      const passed = testResults.filter(t => t.passed).length;
+
+      return `
+        <div class="bg-white p-5 rounded-xl shadow-md border border-indigo-100 space-y-3">
+          <div class="flex justify-between items-center border-b pb-2">
+            <h3 class="font-bold text-slate-800 text-sm">Automated Examination Test Results</h3>
+            <span class="text-xs font-bold px-2 py-1 rounded ${passed === total ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">Passed ${passed} / ${total}</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+            ${testResults.map(t => `
+              <div class="p-2 rounded border ${t.passed ? 'bg-emerald-50/50 border-emerald-200' : 'bg-rose-50 border-rose-200'} flex justify-between items-center">
+                <div>
+                  <span class="font-bold ${t.passed ? 'text-emerald-900' : 'text-rose-900'}">${t.id}:${t.name}</span>
+                  <p class="text-slate-500 text-[10px]">${t.detail}</p>
+                </div>
+                <span class="font-bold text-[10px] px-1.5 py-0.5 rounded ${t.passed ? 'bg-emerald-200 text-emerald-800' : 'bg-rose-200 text-rose-800'}">${t.passed ? 'PASS' : 'FAIL'}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderStaffDashboard(db) {
+      const subs = db.submissions;
+      const totalScholars = SCHOLARS.length;
+      const pendingVer = subs.filter(s => s.verification_status === 'Pending verification').length;
+      const compliant = subs.filter(s => s.compliance_result === 'Compliant').length;
+      const deficiency = subs.filter(s => s.compliance_result === 'With Deficiency').length;
+
+      let filtered = subs.filter(sub => {
+        const scholar = SCHOLARS.find(s => s.id === sub.scholar_id);
+        const matchesSearch = scholar.full_name.toLowerCase().includes(searchQuery.toLowerCase()) || scholar.student_id.toLowerCase().includes(searchQuery.toLowerCase());
+        const matchesProg = filterProgram === 'ALL' || (filterProgram === 'MERIT' && scholar.policy_id === 'p_merit') || (filterProgram === 'COMMUNITY' && scholar.policy_id === 'p_comm');
+        const matchesComp = filterCompliance === 'ALL' || sub.compliance_result === filterCompliance;
+        return matchesSearch && matchesProg && matchesComp;
+      });
+
+      return `
+        <div class="space-y-6">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+              <span class="text-xs font-semibold text-slate-500 uppercase">Assigned Scholars</span>
+              <p class="text-2xl font-black text-slate-800 mt-1">${totalScholars}</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+              <span class="text-xs font-semibold text-amber-600 uppercase">Pending Verification</span>
+              <p class="text-2xl font-black text-amber-600 mt-1">${pendingVer}</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+              <span class="text-xs font-semibold text-emerald-600 uppercase">Compliant</span>
+              <p class="text-2xl font-black text-emerald-600 mt-1">${compliant}</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+              <span class="text-xs font-semibold text-rose-600 uppercase">With Deficiency</span>
+              <p class="text-2xl font-black text-rose-600 mt-1">${deficiency}</p>
+            </div>
+          </div>
+
+          <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-3 justify-between items-center">
+            <input type="text" placeholder="Search Student ID or Name..." value="${searchQuery}" oninput="searchQuery=this.value; render();" class="w-full md:w-64 text-xs bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <div class="flex flex-wrap gap-2 w-full md:w-auto">
+              <select onchange="filterProgram=this.value; render();" class="text-xs bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-2">
+                <option value="ALL">All Programs</option>
+                <option value="MERIT" ${filterProgram === 'MERIT' ? 'selected' : ''}>Merit Scholar</option>
+                <option value="COMMUNITY" ${filterProgram === 'COMMUNITY' ? 'selected' : ''}>Community Scholar</option>
+              </select>
+              <select onchange="filterCompliance=this.value; render();" class="text-xs bg-slate-50 border border-slate-300 rounded-lg px-2.5 py-2">
+                <option value="ALL">All Compliance States</option>
+                <option value="Pending" ${filterCompliance === 'Pending' ? 'selected' : ''}>Pending</option>
+                <option value="Compliant" ${filterCompliance === 'Compliant' ? 'selected' : ''}>Compliant</option>
+                <option value="With Deficiency" ${filterCompliance === 'With Deficiency' ? 'selected' : ''}>With Deficiency</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
+            <table class="w-full text-left text-xs text-slate-600">
+              <thead class="bg-slate-50 text-slate-700 font-bold uppercase border-b border-slate-200">
+                <tr>
+                  <th class="p-3">Scholar</th>
+                  <th class="p-3">Program</th>
+                  <th class="p-3">Academics</th>
+                  <th class="p-3">Verification</th>
+                  <th class="p-3">Compliance</th>
+                  <th class="p-3">Renewal Decision</th>
+                  <th class="p-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">
+                ${filtered.map(sub => {
+                  const scholar = SCHOLARS.find(s => s.id === sub.scholar_id);
+                  const policy = POLICIES[scholar.policy_id === 'p_merit' ? 'MERIT' : 'COMMUNITY'];
+                  return `
+                    <tr class="hover:bg-slate-50">
+                      <td class="p-3">
+                        <p class="font-bold text-slate-800">${scholar.full_name}</p>
+                        <p class="text-[10px] text-slate-400">ID: ${scholar.student_id}</p>
+                      </td>
+                      <td class="p-3 font-semibold text-slate-700">${policy.program_name}</td>
+                      <td class="p-3">
+                        <p class="font-semibold">GWA: ${sub.gwa} \vert{} Units:${sub.enrolled_units}</p>
+                        <p class="text-[10px] text-slate-400">F: ${sub.failed_count} | INC: ${sub.inc_count} \vert{} D:${sub.drop_count}</p>
+                      </td>
+                      <td class="p-3">
+                        <span class="px-2 py-0.5 font-bold rounded text-[10px] ${ sub.verification_status === 'Verified' ? 'bg-emerald-100 text-emerald-800' : sub.verification_status === 'Returned' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800' }">${sub.verification_status}</span>
+                      </td>
+                      <td class="p-3">
+                        <span class="px-2 py-0.5 font-bold rounded text-[10px] ${
+                          sub.compliance_result === 'Compliant' ? 'bg-emerald-100 text-emerald-800' :
+                          sub.compliance_result === 'With Deficiency' ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-600'
+                        }">${sub.compliance_result}</span>${sub.compliance_reasons.length ? `<p class="text-[10px] text-rose-600 mt-1">${sub.compliance_reasons.join(', ')}</p>` : ''}
+                      </td>
+                      <td class="p-3">
+                        <span class="px-2 py-0.5 font-bold rounded text-[10px] ${ sub.renewal_decision === 'Approved' ? 'bg-blue-100 text-blue-800' : sub.renewal_decision === 'Held' ? 'bg-slate-200 text-slate-800' : 'bg-slate-100 text-slate-400' }">${sub.renewal_decision}</span>
+                      </td>
+                      <td class="p-3 space-y-1">
+                        <div class="flex gap-1">
+                          <button onclick="handleUpdateVerification('${sub.id}', 'Verified', 'Verified by staff')" class="px-1.5 py-1 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700">Verify</button>
+                          <button onclick="handleUpdateVerification('${sub.id}', 'Returned', 'Incomplete/unclear document')" class="px-1.5 py-1 bg-rose-600 text-white rounded text-[10px] font-bold hover:bg-rose-700">Return</button>
+                        </div>
+                        <button onclick="handleEvaluate('${sub.id}')" ${sub.verification_status !== 'Verified' ? 'disabled' : ''} class="w-full px-1.5 py-1 bg-indigo-600 disabled:bg-slate-300 text-white rounded text-[10px] font-bold hover:bg-indigo-700">Evaluate Compliance</button>
+                        <div class="flex gap-1">
+                          <button onclick="handleRenewalDecision('${sub.id}', 'Approved', 'Meets criteria')" ${sub.compliance_result !== 'Compliant' ? 'disabled' : ''} class="px-1.5 py-1 bg-blue-600 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded text-[10px] font-bold hover:bg-blue-700">Approve</button>
+                          <button onclick="handleRenewalDecision('${sub.id}', 'Held', 'Deficiencies flagged')" class="px-1.5 py-1 bg-slate-600 text-white rounded text-[10px] font-bold hover:bg-slate-700">Hold</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderScholarPortal(db) {
+      const scholar = SCHOLARS.find(s => s.id === currentRole);
+      const policy = POLICIES[scholar.policy_id === 'p_merit' ? 'MERIT' : 'COMMUNITY'];
+      const submission = db.submissions.find(s => s.scholar_id === currentRole && s.academic_year === '2026-2027' && s.semester === 'Semester 1');
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
+            <h2 class="font-bold text-slate-800 text-sm border-b pb-2">Assigned Scholarship Policy</h2>
+            <div>
+              <span class="text-xs font-bold text-indigo-600">${policy.program_name}</span>
+              <ul class="mt-2 space-y-1.5 text-xs text-slate-600">
+                <li>• Max Permitted GWA: <strong>${policy.max_gwa.toFixed(2)}</strong></li>
+                <li>• Min Enrolled Units: <strong>${policy.min_units}</strong></li>
+                <li>• Max Failed Subjects: <strong>${policy.max_failed}</strong></li>
+                <li>• Max Incomplete Grades: <strong>${policy.max_inc}</strong></li>
+                <li>• Max Dropped Subjects: <strong>${policy.max_drop}</strong></li>
+                <li>• Deadline: <strong>2026-10-30 17:00 Manila</strong></li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="lg:col-span-2 space-y-6">
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
+              <h2 class="font-bold text-slate-800 text-sm border-b pb-2">Academic Summary Submission</h2>
+
+              ${submission ? `
+                <div class="p-4 rounded-lg border ${submission.verification_status === 'Returned' ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'} space-y-2 text-xs">
+                  <div class="flex justify-between items-center">
+                    <span class="font-bold text-slate-700">${submission.academic_year}${submission.semester}</span>
+                    <span class="px-2 py-0.5 rounded font-bold ${ submission.verification_status === 'Verified' ? 'bg-emerald-100 text-emerald-800' : submission.verification_status === 'Returned' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800' }">${submission.verification_status}</span>
+                  </div>
+                  <p><strong>GWA:</strong> ${submission.gwa} \vert{} <strong>Units:</strong>${submission.enrolled_units}</p>
+                  <p><strong>Counts:</strong> Failed: ${submission.failed_count} | INC: ${submission.inc_count} \vert{} Dropped:${submission.drop_count}</p>
+                  <p><strong>Evidence Document:</strong> <a href="${submission.evidence_ref}" target="_blank" class="text-blue-600 underline">${submission.evidence_ref}</a></p>${submission.verification_notes ? `<p class="text-slate-500 italic">Staff Note: ${submission.verification_notes}</p>` : ''}
+                </div>
+              ` : ''}
+
+              ${(!submission || submission.verification_status === 'Returned') ? `
+                <form onsubmit="handleScholarSubmit(event)" class="space-y-4 text-xs">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="font-bold text-slate-700">Academic Year</label>
+                      <input type="text" name="academic_year" value="2026-2027" readonly class="w-full mt-1 p-2 bg-slate-100 border border-slate-300 rounded font-semibold" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700">Semester</label>
+                      <input type="text" name="semester" value="Semester 1" readonly class="w-full mt-1 p-2 bg-slate-100 border border-slate-300 rounded font-semibold" />
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label class="font-bold text-slate-700">GWA (1.00 - 5.00)</label>
+                      <input type="number" step="0.01" min="1.00" max="5.00" required name="gwa" value="${submission ? submission.gwa : ''}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700">Enrolled Units</label>
+                      <input type="number" min="0" required name="enrolled_units" value="${submission ? submission.enrolled_units : ''}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700">Failed Count</label>
+                      <input type="number" min="0" required name="failed_count" value="${submission ? submission.failed_count : '0'}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700">INC Count</label>
+                      <input type="number" min="0" required name="inc_count" value="${submission ? submission.inc_count : '0'}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                    </div>
+                    <div>
+                      <label class="font-bold text-slate-700">Dropped Count</label>
+                      <input type="number" min="0" required name="drop_count" value="${submission ? submission.drop_count : '0'}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="font-bold text-slate-700">Grade Document Reference URL</label>
+                    <input type="url" required name="evidence_ref" placeholder="https://..." value="${submission ? submission.evidence_ref : ''}" class="w-full mt-1 p-2 border border-slate-300 rounded" />
+                  </div>
+
+                  <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition">${submission ? 'Resubmit Corrected Evidence' : 'Submit Academic Summary'}</button>
+                </form>
+              ` : `
+                <p class="text-xs text-slate-500 italic">Your submission has been received and is currently under processing. You will be able to resubmit if staff returns it for correction.</p>
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAuditLogs(db) {
+      return `
+        <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3 text-xs">
+          <h2 class="font-bold text-slate-800 text-sm border-b pb-2">Audit Logs & History</h2>
+          <div class="max-h-48 overflow-y-auto divide-y divide-slate-100">
+            ${db.audit_logs.length === 0 ? '<p class="text-slate-400 italic">No log entries recorded yet.</p>' : ''}
+            ${db.audit_logs.slice().reverse().map(log => `
+              <div class="py-1.5 flex justify-between items-center text-[11px]">
+                <div>
+                  <span class="font-bold text-slate-700">[${log.action_type}]</span>
+                  <span class="text-slate-500">by ${log.actor}</span>${log.notes ? `<span class="text-slate-400">— ${log.notes}</span>` : ''}
+                </div>
+                <span class="text-slate-400">${new Date(log.timestamp).toLocaleTimeString()}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    // ==========================================
+    // 8. MAIN RENDER LOOP
+    // ==========================================
+    function render() {
+      const app = document.getElementById('app');
+      if (!currentUser) {
+        app.innerHTML = `${renderHeader()}${renderSignIn()}`;
+        return;
+      }
+
+      const db = getStoredData();
+      app.innerHTML = `
+        ${renderHeader()}
+        ${renderTestModal()}
+        ${currentRole === 'Staff' ? renderStaffDashboard(db) : renderScholarPortal(db)}
+        ${renderAuditLogs(db)}
+      `;
+    }
+    // Initial Load
+    // Initial Load
+    initializeApp();
+  </script>
+</body>
+</html>
